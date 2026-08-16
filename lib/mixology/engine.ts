@@ -9,7 +9,7 @@ import type { LLMMessage } from "../llm-prompt-assembler";
 import { loadApiConfigs, loadBindingConfig } from "../settings-storage";
 import type { ApiConfig } from "../settings-types";
 import { applyMixMacros, assembleMixPrompt, MIX_ENCORE_CLOSE, MIX_ENCORE_OPEN, MIX_TICKET_CLOSE, MIX_TICKET_OPEN, type MixAssembledPrompt } from "./assembler";
-import { extractMixBlocks } from "./prose";
+import { applyMixFilterRules, extractMixBlocks } from "./prose";
 import {
     getMixMaterial,
     getMixSession,
@@ -63,8 +63,10 @@ function assembleFromSession(session: MixSession): { prompt: MixAssembledPrompt;
  */
 export function mixTurnRawText(turn: MixTurn): string {
     if (turn.role !== "assistant") return turn.text;
-    const parts = [turn.text];
+    // 顺序与输出要求一致：状态栏在正文前、小剧场在正文后——历史回放就是模型的"输出习惯"示范
+    const parts = [];
     if (turn.ticketRaw) parts.push(`${MIX_TICKET_OPEN}\n${turn.ticketRaw}\n${MIX_TICKET_CLOSE}`);
+    parts.push(turn.text);
     if (turn.encoreRaw) parts.push(`${MIX_ENCORE_OPEN}\n${turn.encoreRaw}\n${MIX_ENCORE_CLOSE}`);
     return parts.filter(Boolean).join("\n\n");
 }
@@ -221,8 +223,15 @@ async function runMixGeneration(
         { appId: MIX_PROMPT_APP_ID, appTags: MIX_PROMPT_TAGS, skipOutputRegex: true, signal },
     );
     const extracted = extractMixBlocks(raw);
-    const { text, encoreRaw } = extracted;
+    const { encoreRaw } = extracted;
     let { ticketRaw } = extracted;
+    // 滤网「进上下文」模式：拆完块后清洗正文再入库，历史发回模型的就是洗过的
+    const filterMat = session.recipe.slots.filter ? getMixMaterial(session.recipe.slots.filter) : null;
+    const text = applyMixFilterRules(
+        extracted.text,
+        filterMat?.kind === "filter" ? filterMat.rules : undefined,
+        "context",
+    );
     if (!text && !ticketRaw) {
         throw new ChatEngineError("模型没有给出内容，请再试一次。");
     }

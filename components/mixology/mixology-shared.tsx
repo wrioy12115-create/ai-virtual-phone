@@ -8,6 +8,7 @@ import {
     BookOpen,
     CircleUserRound,
     Feather,
+    Filter,
     Flame,
     GlassWater,
     Music4,
@@ -29,11 +30,26 @@ const KIND_ICONS: Record<MixMaterialKind, typeof UserRound> = {
     ticket: ReceiptText,
     garnish: Sparkles,
     encore: Music4,
+    filter: Filter,
 };
 
 export function KindGlyph({ kind, size = 26 }: { kind: MixMaterialKind; size?: number }) {
     const Icon = KIND_ICONS[kind];
     return <Icon size={size} strokeWidth={1.6} />;
+}
+
+/**
+ * 作者小头像：没有头像就用名字首字的圆片。线上详情、酒柜详情、创作者资料入口共用。
+ * name 必须传"旁边实际显示的那个名字"（自己没起笔名就是「我」，别人没署名就是「匿名调酒师」），
+ * 圆片里的字才不会和名字对不上。
+ */
+export function AuthorAvatar({ name, avatar, size = 32 }: { name?: string; avatar?: string; size?: number }) {
+    const display = (name ?? "").trim() || "我";
+    if (avatar) {
+        // eslint-disable-next-line @next/next/no-img-element
+        return <img className="mix-avatar" src={avatar} alt={display} style={{ width: size, height: size }} />;
+    }
+    return <span className="mix-avatar-fallback" style={{ width: size, height: size, fontSize: Math.round(size * 0.48) }}>{display.slice(0, 1)}</span>;
 }
 
 export function formatMixTime(ts: number): string {
@@ -211,6 +227,20 @@ export function MaterialDetail({ material }: { material: MixMaterial }) {
                 <DetailField label="一句话介绍" value={material.hook} />
                 <DetailField label="输出契约" value={material.contract} />
                 <DetailField label="渲染代码" value={mixEncoreRenderHtml(material)} code />
+            </>
+        );
+    }
+    if (material.kind === "filter") {
+        return (
+            <>
+                <DetailField label="一句话介绍" value={material.hook} />
+                <DetailField
+                    label={`清洗规则 · ${material.rules.length} 条`}
+                    value={material.rules
+                        .map((r, i) => `${i + 1}.（${r.mode === "display" ? "仅显示" : "进上下文"}）/${r.find}/ → ${r.replace || "（删除）"}`)
+                        .join("\n")}
+                    code
+                />
             </>
         );
     }

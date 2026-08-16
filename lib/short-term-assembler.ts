@@ -913,17 +913,38 @@ export function prepareShortTermContext(
     unifiedRecentItems: UnifiedRecentItem[];
 } {
     const timeAware = resolvePromptTimeAware(options?.timeAware);
-    const timeline = loadNativeTimeline(characterId, {
+    let timeline = loadNativeTimeline(characterId, {
         userName: options?.userName,
         appId: appId as import("./settings-types").ContentAppId,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
         timeAware,
         promptTimestampOptions: options?.promptTimestampOptions,
     });
-    // Activation context: full timeline for keyword matching (not truncated)
-    const wbActivationContext = timeline.slice(-10).map(e => e.content).join("\n");
 
     const memConfig = loadMemoryConfig();
+    const allowed = memConfig.shortTermAllowedSources ?? {};
+    timeline = timeline.filter(entry => {
+        const source = entry.sourceApp;
+        if (source === "chat") {
+            if (entry.sourceDetail === "group") {
+                return allowed.group_chat !== false;
+            }
+            return allowed.chat !== false;
+        }
+        if (source === "story") {
+            return allowed.story !== false;
+        }
+        if (source === "vn") {
+            return allowed.vn !== false;
+        }
+        if (source === "map") {
+            return allowed.adventure !== false;
+        }
+        return (allowed as any)[source] !== false;
+    });
+
+    // Activation context: full timeline for keyword matching (not truncated)
+    const wbActivationContext = timeline.slice(-10).map(e => e.content).join("\n");
     const budget = memConfig.shortTermTokenBudget;
     const currentTag = getFeatureTag(appId);
     const history = options?.history ?? [];
@@ -1169,14 +1190,35 @@ export function prepareGroupShortTermContext(
     const uniqueCharacterIds = [...new Set(characterIds)];
     const timelineByKey = new Map<string, NativeTimelineEntry>();
     const timeAware = resolvePromptTimeAware(options?.timeAware);
+    const memConfig = loadMemoryConfig();
+    const allowed = memConfig.shortTermAllowedSources ?? {};
 
     for (const characterId of uniqueCharacterIds) {
-        const timeline = loadNativeTimeline(characterId, {
+        let timeline = loadNativeTimeline(characterId, {
             userName: options?.userName,
             appId: "group_chat",
             excludeOfflineSessionId: options?.excludeOfflineSessionId,
             timeAware,
             promptTimestampOptions: options?.promptTimestampOptions,
+        });
+        timeline = timeline.filter(entry => {
+            const source = entry.sourceApp;
+            if (source === "chat") {
+                if (entry.sourceDetail === "group") {
+                    return allowed.group_chat !== false;
+                }
+                return allowed.chat !== false;
+            }
+            if (source === "story") {
+                return allowed.story !== false;
+            }
+            if (source === "vn") {
+                return allowed.vn !== false;
+            }
+            if (source === "map") {
+                return allowed.adventure !== false;
+            }
+            return (allowed as any)[source] !== false;
         });
         for (const entry of timeline) {
             if (entry.sourceApp === "chat" && entry.sourceDetail === "group" && entry.groupSessionId === options?.excludeGroupSessionId) {
@@ -1193,7 +1235,6 @@ export function prepareGroupShortTermContext(
     ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const wbActivationContext = activationPool.slice(-10).map(item => item.content).join("\n");
 
-    const memConfig = loadMemoryConfig();
     const budget = memConfig.shortTermTokenBudget;
 
     const raw: { tag: string; order: number; entries: NativeTimelineEntry[] }[] = [];

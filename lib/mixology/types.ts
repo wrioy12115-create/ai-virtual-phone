@@ -5,7 +5,7 @@
 // 各挑一件调成「特调」，特调可命名保存/分享。对局 = 角色卡 + 特调的一次运行。
 // 本文件只定义数据形状，装配见 assembler.ts，存取见 storage.ts。
 
-/** 材料九类（槽位一一对应） */
+/** 材料十类（槽位一一对应） */
 export type MixMaterialKind =
     | "character" // 角色卡
     | "persona"   // 面具：用户人设（{{user}} 的名字与设定）
@@ -15,7 +15,8 @@ export type MixMaterialKind =
     | "strength"  // 苦精：尾部强化（离生成最近、权重最高）
     | "ticket"    // 小票：状态数据卡（输出契约 + 渲染代码）
     | "garnish"   // 装饰：界面美化 CSS
-    | "encore";   // 尾调：随卡互动 HTML 小品
+    | "encore"    // 尾调：随卡互动 HTML 小品
+    | "filter";   // 滤网：正则清洗正文（不进提示词）
 
 export const MIX_KIND_LABELS: Record<MixMaterialKind, string> = {
     character: "角色卡",
@@ -27,11 +28,12 @@ export const MIX_KIND_LABELS: Record<MixMaterialKind, string> = {
     ticket: "小票",
     garnish: "装饰",
     encore: "尾调",
+    filter: "滤网",
 };
 
 /** 吧台槽位顺序（角色卡永远第一槽） */
 export const MIX_SLOT_ORDER: MixMaterialKind[] = [
-    "character", "persona", "base", "flavor", "glass", "strength", "ticket", "garnish", "encore",
+    "character", "persona", "base", "flavor", "glass", "strength", "ticket", "garnish", "encore", "filter",
 ];
 
 /** 每类材料在提示词里的正规段名（装饰不进提示词，标它的实际职责） */
@@ -45,6 +47,7 @@ export const MIX_KIND_SECTION_LABELS: Record<MixMaterialKind, string> = {
     ticket: "状态栏",
     garnish: "界面样式",
     encore: "小剧场",
+    filter: "文本清洗",
 };
 
 /** 必选槽：没配齐不能开局；其余槽可留空 */
@@ -69,13 +72,17 @@ export type MixMaterialMeta = {
     hook?: string;
     /** 创作者署名（本地自建可空） */
     author?: string;
+    /** 创作者头像 dataURL：入柜时随线上条目带回；自己的材料展示本地创作者资料，不用这个字段 */
+    authorAvatar?: string;
     tags?: string[];
     /** 封面图 dataURL 或远端地址（角色卡强烈建议有） */
     cover?: string;
-    /** 已发布到酒单时的线上 id：有它才谈得上"更新已发布版本" */
+    /** 已上架到酒材页时的线上 id：有它才谈得上"更新已发布版本" */
     publishedId?: string;
+    /** 最近一次同步到云端成功时的 updatedAt 快照；本地 updatedAt 比它新 = 有未上架修改 */
+    publishedAt?: number;
     /**
-     * 来自酒单/大厅的别人的作品。与应用市场、游戏大厅同规矩：
+     * 来自酒材页/配方页的别人的作品。与应用市场、游戏大厅同规矩：
      * 能拿来开局，但站内不展示正文、不能编辑、不能导出、不能二次发布。
      */
     imported?: boolean;
@@ -162,13 +169,33 @@ export function mixEncoreRenderHtml(material: MixEncoreMaterial): string {
     return material.renderHtml ?? material.html ?? "";
 }
 
+/** 滤网单条规则：正则查找 + 替换文本 + 作用模式 */
+export type MixFilterRule = {
+    /** 查找（JS 正则，自动带 g 标志） */
+    find: string;
+    /** 替换文本（支持 $1 等捕获组引用；空串即删除） */
+    replace: string;
+    /**
+     * display = 仅显示：存的和发给模型的都是原文，只在渲染前替换，对全部历史即时生效；
+     * context = 进上下文：回复拆完块后清洗一遍再入库，历史发回模型的是洗过的，只对新回复生效。
+     */
+    mode: "display" | "context";
+};
+
+/** 滤网：对 AI 正文做正则清洗（拆完状态栏/小剧场块之后才执行，不碰块数据，不进提示词） */
+export type MixFilterMaterial = MixMaterialMeta & {
+    kind: "filter";
+    rules: MixFilterRule[];
+};
+
 export type MixMaterial =
     | MixCharacterCard
     | MixPersonaMaterial
     | MixTextMaterial
     | MixTicketMaterial
     | MixGarnishMaterial
-    | MixEncoreMaterial;
+    | MixEncoreMaterial
+    | MixFilterMaterial;
 
 /** 特调方案：每个槽位记录所用材料 id（材料本体在酒柜里） */
 export type MixRecipe = {
@@ -176,9 +203,14 @@ export type MixRecipe = {
     name: string;
     /** kind → 材料 id；角色卡必有，其余可缺 */
     slots: Partial<Record<MixMaterialKind, string>>;
-    /** 已发布到大厅时的线上 id */
+    /** 作者署名与头像：从配方页入柜时带回；自己的配方展示本地创作者资料 */
+    author?: string;
+    authorAvatar?: string;
+    /** 已上架到配方页时的线上 id */
     publishedId?: string;
-    /** 从大厅导入的别人的配方：不能二次发布 */
+    /** 最近一次同步到云端成功时的 updatedAt 快照 */
+    publishedAt?: number;
+    /** 从配方页导入的别人的配方：不能二次发布 */
     imported?: boolean;
     createdAt: number;
     updatedAt: number;
@@ -212,6 +244,17 @@ export type MixSession = {
     createdAt: number;
     updatedAt: number;
 };
+
+/**
+ * 与云端的关联状态（参考应用市场的显式同步模型）：
+ * local = 没上架过；synced = 已上架且本地无改动；dirty = 已上架但本地改动还没同步。
+ * 同步是显式动作——本地保存永远不自动推云端，云端也不会反向覆盖本地。
+ */
+export function mixCloudState(item: { publishedId?: string; publishedAt?: number; updatedAt: number }): "local" | "synced" | "dirty" {
+    if (!item.publishedId) return "local";
+    if (!item.publishedAt || item.updatedAt > item.publishedAt) return "dirty";
+    return "synced";
+}
 
 /** 生成短 id（本地实体通用） */
 export function createMixId(prefix: string): string {

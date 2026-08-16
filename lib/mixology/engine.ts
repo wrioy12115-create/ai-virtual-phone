@@ -57,13 +57,21 @@ function assembleFromSession(session: MixSession): { prompt: MixAssembledPrompt;
     return { prompt, ticket };
 }
 
-/** 历史回放时给 assistant 消息补回状态栏/小剧场块，让模型看得到自己之前的输出习惯 */
-function turnToHistoryContent(turn: MixTurn): string {
+/**
+ * 还原一条消息的"原始输出"：assistant 轮把剥掉的状态栏/小剧场块拼回去。
+ * 历史回放与「编辑原始输出」共用——编辑时看到的就是模型当初写的完整样子。
+ */
+export function mixTurnRawText(turn: MixTurn): string {
     if (turn.role !== "assistant") return turn.text;
     const parts = [turn.text];
     if (turn.ticketRaw) parts.push(`${MIX_TICKET_OPEN}\n${turn.ticketRaw}\n${MIX_TICKET_CLOSE}`);
     if (turn.encoreRaw) parts.push(`${MIX_ENCORE_OPEN}\n${turn.encoreRaw}\n${MIX_ENCORE_CLOSE}`);
-    return parts.join("\n\n");
+    return parts.filter(Boolean).join("\n\n");
+}
+
+/** 历史回放时给 assistant 消息补回状态栏/小剧场块，让模型看得到自己之前的输出习惯 */
+function turnToHistoryContent(turn: MixTurn): string {
+    return mixTurnRawText(turn);
 }
 
 function buildMixMessages(
@@ -108,12 +116,15 @@ export function startMixSession(
     if (!card || card.kind !== "character") {
         throw new ChatEngineError("特调里没有角色卡，装不满这一杯。");
     }
+    // 代入名：显式传入 > 面具材料的代入名（装配器同规则，这里快照进对局供界面用）
+    const personaMat = recipe.slots.persona ? getMixMaterial(recipe.slots.persona) : null;
+    const personaUserName = personaMat?.kind === "persona" ? personaMat.userName?.trim() : undefined;
     const openingIndex = options?.openingIndex ?? 0;
     const session: MixSession = {
         id: createMixId("mixsess"),
         recipe: { ...recipe, slots: { ...recipe.slots } },
         charName: card.charName.trim() || card.name,
-        userName: options?.userName?.trim() || undefined,
+        userName: options?.userName?.trim() || personaUserName || undefined,
         openingIndex,
         turns: [],
         createdAt: Date.now(),
@@ -275,6 +286,49 @@ export async function continueMix(sessionId: string, signal?: AbortSignal): Prom
     const current = getMixSession(sessionId);
     if (!current) throw new ChatEngineError("对局不存在。");
     return runMixGeneration(current, "（请接着上文继续推进剧情，直接续写，不要重复已写过的内容。）", signal);
+}
+
+/** 回溯到某条消息：保留它，删除其后的全部内容 */
+export function truncateMixAfterTurn(sessionId: string, turnId: string): MixSession {
+    const current = getMixSession(sessionId);
+    if (!current) throw new ChatEngineError("对局不存在。");
+    const idx = current.turns.findIndex((t) => t.id === turnId);
+    if (idx < 0) throw new ChatEngineError("消息不存在。");
+    const updated: MixSession = { ...current, turns: current.turns.slice(0, idx + 1) };
+    saveMixSession(updated);
+    return updated;
+}
+
+/**
+ * 编辑某条消息并删除其后的全部内容。
+ * assistant 轮编辑的是"原始输出"（含 [状态栏]/[小剧场] 块）——保存时重新剥块解析，
+ * 模型输出掉了格式也能手动修好重渲染；玩家发言仍是纯文本。
+ * 编辑的是玩家发言时，调用方应随后用 regenerateMixTail 重新生成回复。
+ */
+export function editMixTurn(sessionId: string, turnId: string, newText: string): MixSession {
+    const current = getMixSession(sessionId);
+    if (!current) throw new ChatEngineError("对局不存在。");
+    const idx = current.turns.findIndex((t) => t.id === turnId);
+    if (idx < 0) throw new ChatEngineError("消息不存在。");
+    const trimmed = newText.trim();
+    if (!trimmed) throw new ChatEngineError("消息不能为空。");
+    let edited: MixTurn;
+    if (current.turns[idx].role === "assistant") {
+        const { text, ticketRaw, encoreRaw } = extractMixBlocks(trimmed);
+        edited = { ...current.turns[idx], text, ticketRaw, encoreRaw };
+    } else {
+        edited = { ...current.turns[idx], text: trimmed };
+    }
+    const updated: MixSession = { ...current, turns: [...current.turns.slice(0, idx), edited] };
+    saveMixSession(updated);
+    return updated;
+}
+
+/** 对当前历史直接生成回复（编辑玩家发言后的重新生成） */
+export async function regenerateMixTail(sessionId: string, signal?: AbortSignal): Promise<MixReplyResult> {
+    const current = getMixSession(sessionId);
+    if (!current) throw new ChatEngineError("对局不存在。");
+    return runMixGeneration(current, undefined, signal);
 }
 
 /** 撤回最后一轮：删掉最后一条玩家发言及其后的全部回复 */
